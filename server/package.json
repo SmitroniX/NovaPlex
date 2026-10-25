@@ -1,0 +1,16 @@
+{
+  "name": "novaplex-server",
+  "version": "1.0.0",
+  "description": "NovaPlex 4K HDR10+ Media Server Engine",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node test/db.test.js && node test/scanner.test.js && node test/stream.test.js && node test/system.test.js && node test/boost.test.js && node test/gofile.test.js && node test/e2e.test.js"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.3",
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  }
+}

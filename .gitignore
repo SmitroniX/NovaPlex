@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+client/node_modules/
+server/node_modules/
+
+# Production build outputs
+client/dist/
+
+# SQLite Database & Runtime Data
+*.db
+*.db-shm
+*.db-wal
+server/data/transcode/*
+!server/data/transcode/.gitkeep
+server/data/cache/*
+!server/data/cache/.gitkeep
+server/data/cache/images/*
+!server/data/cache/images/.gitkeep
+
+# Heavy Video Files (Keep small .strm pointers and folder structures)
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.webm
+*.ts
+*.m4v
+
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# System
+.DS_Store
+Thumbs.db

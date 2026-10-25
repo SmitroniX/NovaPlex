@@ -1,0 +1,17 @@
+{
+  "name": "novaplex",
+  "version": "1.0.0",
+  "description": "NovaPlex - Apple Liquid Glass Media Server & Cinema PWA Client",
+  "main": "server/src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server/src/server.js",
+    "server": "node server/src/server.js",
+    "client": "npm run dev --prefix client",
+    "build:client": "npm run build --prefix client",
+    "test": "node server/test/db.test.js && node server/test/scanner.test.js && node server/test/stream.test.js && node server/test/e2e.test.js"
+  },
+  "keywords": ["media-server", "plex", "streaming", "4k", "hdr10", "liquid-glass"],
+  "author": "NovaPlex Team",
+  "license": "MIT"
+}
