@@ -1741,6 +1741,7 @@ export default function NovaPlayer() {
       {/* Video Element */}
       <video
         ref={videoRef}
+        preload="auto"
         className={`w-full h-full pointer-events-none transition-all duration-300 ${
           aspectRatioMode === 'cover'
             ? 'object-cover'
@@ -1983,22 +1984,33 @@ export default function NovaPlayer() {
             <div className="p-2.5 rounded-2xl bg-white/[0.04] border border-white/10 flex flex-col gap-1.5">
               <div className="flex justify-between items-center text-white/50 text-[10px] uppercase font-bold tracking-wider">
                 <span>Buffer Health</span>
-                <span className="text-blue-400 font-bold">{nerdStats.bufferHealth}</span>
+                <div className="flex items-center gap-1.5">
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                    (nerdStats.bufferAheadSecs || 0) >= 15
+                      ? 'bg-emerald-500/20 text-emerald-300'
+                      : (nerdStats.bufferAheadSecs || 0) >= 5
+                      ? 'bg-amber-500/20 text-amber-300'
+                      : 'bg-red-500/20 text-red-400'
+                  }`}>
+                    {(nerdStats.bufferAheadSecs || 0) >= 15 ? 'Optimal' : (nerdStats.bufferAheadSecs || 0) >= 5 ? 'Good' : 'Buffering'}
+                  </span>
+                  <span className="text-blue-400 font-bold">{nerdStats.bufferHealth}</span>
+                </div>
               </div>
               {/* Buffer Bar */}
               <div className="w-full h-2 rounded-full bg-white/10 overflow-hidden relative">
                 <div
                   className={`h-full transition-all duration-300 rounded-full ${
-                    (nerdStats.bufferAheadSecs || 0) > 10
+                    (nerdStats.bufferAheadSecs || 0) >= 15
                       ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]'
-                      : (nerdStats.bufferAheadSecs || 0) > 3
+                      : (nerdStats.bufferAheadSecs || 0) >= 5
                       ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)]'
                       : 'bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.8)]'
                   }`}
                   style={{ width: `${Math.min(100, ((nerdStats.bufferAheadSecs || 0) / 60) * 100)}%` }}
                 />
               </div>
-              <p className="text-[9px] text-white/40">Target Buffer: 60s • Auto-managed adaptive pipeline</p>
+              <p className="text-[9px] text-white/40">Target Buffer: 60s Ahead • Auto-managed adaptive pipeline</p>
             </div>
 
             {/* Stream Codecs & Dynamic Range */}
