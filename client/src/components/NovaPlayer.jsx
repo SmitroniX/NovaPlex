@@ -495,12 +495,15 @@ export default function NovaPlayer() {
         debug: false,
         enableWorker: true,
         lowLatencyMode: false,
-        backBufferLength: 60,
-        maxBufferLength: 30,
-        maxMaxBufferLength: 60,
-        maxBufferSize: 60 * 1000 * 1000,
+        backBufferLength: 90,
+        maxBufferLength: 60,
+        maxMaxBufferLength: 120,
+        maxBufferSize: 150 * 1000 * 1000,
         maxBufferHole: 0.5,
         startFragPrefetch: true,
+        progressive: true,
+        liveSyncDurationCount: 15,
+        liveMaxLatencyDurationCount: 30,
         highBufferWatchdogPeriod: 2,
         manifestLoadingTimeOut: 20000,
         manifestLoadingMaxRetry: 4,
@@ -1352,7 +1355,7 @@ export default function NovaPlayer() {
       let bufferAhead = 0;
       if (video.buffered) {
         for (let i = 0; i < video.buffered.length; i++) {
-          if (video.currentTime >= video.buffered.start(i) && video.currentTime <= video.buffered.end(i)) {
+          if (video.currentTime >= (video.buffered.start(i) - 0.25) && video.currentTime <= (video.buffered.end(i) + 0.25)) {
             bufferAhead = Math.max(0, video.buffered.end(i) - video.currentTime);
             break;
           }
@@ -1992,10 +1995,10 @@ export default function NovaPlayer() {
                       ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)]'
                       : 'bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.8)]'
                   }`}
-                  style={{ width: `${Math.min(100, ((nerdStats.bufferAheadSecs || 0) / 30) * 100)}%` }}
+                  style={{ width: `${Math.min(100, ((nerdStats.bufferAheadSecs || 0) / 60) * 100)}%` }}
                 />
               </div>
-              <p className="text-[9px] text-white/40">Target Buffer: 30s • Auto-managed adaptive pipeline</p>
+              <p className="text-[9px] text-white/40">Target Buffer: 60s • Auto-managed adaptive pipeline</p>
             </div>
 
             {/* Stream Codecs & Dynamic Range */}

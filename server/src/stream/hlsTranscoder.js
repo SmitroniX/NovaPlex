@@ -370,7 +370,7 @@ function buildFfmpegArgs({
         '-vf', videoFilters.join(','),
         '-c:v', 'libx264',
         '-preset', profile.preset || 'ultrafast',
-        '-tune', 'zerolatency',
+        '-tune', 'fastdecode',
         '-fps_mode', 'passthrough'
       );
       if (profile.crf !== undefined) {
@@ -398,6 +398,7 @@ function buildFfmpegArgs({
     '-f', 'hls',
     '-hls_time', '3',
     '-hls_list_size', '0',
+    '-hls_playlist_type', 'event',
     '-hls_segment_type', 'mpegts',
     '-hls_segment_filename', segmentPattern,
     playlistPath
