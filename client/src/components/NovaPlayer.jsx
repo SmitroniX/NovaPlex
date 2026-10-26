@@ -133,6 +133,7 @@ export default function NovaPlayer() {
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   const [showRemainingTime, setShowRemainingTime] = useState(false);
   const [bufferedEnd, setBufferedEnd] = useState(0);
+  const [bufferedRange, setBufferedRange] = useState({ start: 0, end: 0 });
 
   // Player & Cinema UX Enhancement States
   const [brightness, setBrightness] = useState(1.0); // 0.2 to 1.5
@@ -212,6 +213,8 @@ export default function NovaPlayer() {
   const accumulatedSkipRef = useRef(0);
   const lastSkipDirectionRef = useRef(null);
   const isScrubbingRef = useRef(false);
+  const isSeekingRef = useRef(false);
+  const streamOffsetRef = useRef(0);
   const seekStallTimeoutRef = useRef(null);
   const lastTouchRevealTimeRef = useRef(0);
   const tapHistoryRef = useRef({ time: 0, x: 0, y: 0 });
@@ -244,7 +247,10 @@ export default function NovaPlayer() {
   const activeCurrentTime = isScrubbing ? scrubTime : currentTime;
   const remainingTime = Math.max(0, displayDuration - activeCurrentTime);
   const progressPercent = displayDuration > 0 ? Math.min(100, Math.max(0, (activeCurrentTime / displayDuration) * 100)) : 0;
-  const bufferedPercent = displayDuration > 0 ? Math.min(100, (bufferedEnd / displayDuration) * 100) : 0;
+  const bufferedStartPercent = displayDuration > 0 ? Math.min(100, Math.max(0, (bufferedRange.start / displayDuration) * 100)) : 0;
+  const bufferedEndPercent = displayDuration > 0 ? Math.min(100, Math.max(0, (bufferedRange.end / displayDuration) * 100)) : 0;
+  const bufferedWidthPercent = Math.max(0, bufferedEndPercent - bufferedStartPercent);
+  const bufferedPercent = bufferedEndPercent;
 
   // Intro Detection and State
   const introChapter = chapters?.find(c => {
@@ -457,6 +463,9 @@ export default function NovaPlayer() {
       ? startPos
       : (currentTimeRef.current || playingItem.startPosition || 0);
 
+    streamOffsetRef.current = isDirectFileMode ? 0 : seekTime;
+    setCurrentTime(seekTime);
+
     setIsLoading(true);
     setErrorMessage(null);
     setErrorDetails('');
@@ -483,6 +492,7 @@ export default function NovaPlayer() {
     if (Hls.isSupported()) {
       const hls = new Hls({
         fLoader: CachedFragmentLoader,
+        debug: false,
         enableWorker: true,
         lowLatencyMode: false,
         backBufferLength: 60,
@@ -514,10 +524,6 @@ export default function NovaPlayer() {
         mediaErrorCountRef.current = 0;
         setReconnectToast(null);
 
-        if (seekTime > 0) {
-          video.currentTime = seekTime;
-        }
-
         video.playbackRate = playbackSpeed;
 
         video.play().then(() => {
@@ -529,6 +535,23 @@ export default function NovaPlayer() {
           setShowControls(true);
         });
       });
+
+      // Synchronize playhead once media chunk is actually buffered in MSE
+      if (seekTime > 0) {
+        const seekSafetyTimer = setTimeout(() => {
+          isSeekingRef.current = false;
+        }, 15000);
+
+        hls.once(Hls.Events.FRAG_BUFFERED, () => {
+          clearTimeout(seekSafetyTimer);
+          isSeekingRef.current = false;
+          if (videoRef.current) {
+            videoRef.current.play().catch(() => {});
+          }
+        });
+      } else {
+        isSeekingRef.current = false;
+      }
 
       // Robust Error Handling & Exponential Backoff Auto-Recovery
       hls.on(Hls.Events.ERROR, (event, data) => {
@@ -654,25 +677,42 @@ export default function NovaPlayer() {
     }
   }, [playbackSpeed]);
 
+  const handleSeeked = () => {
+    isSeekingRef.current = false;
+    if (videoRef.current) {
+      const streamOffset = isDirectFileMode ? 0 : streamOffsetRef.current;
+      setCurrentTime(streamOffset + videoRef.current.currentTime);
+    }
+  };
+
   // Video element events
   const handleTimeUpdate = () => {
     if (!videoRef.current || !playingItem) return;
-    const cur = videoRef.current.currentTime;
+    const v = videoRef.current;
+    const streamOffset = isDirectFileMode ? 0 : streamOffsetRef.current;
+    const cur = streamOffset + v.currentTime;
     const total = authoritativeDuration;
 
-    if (!isScrubbing) {
+    if (!isScrubbingRef.current && !isSeekingRef.current) {
       setCurrentTime(cur);
+      if (total > 0 && total !== duration) {
+        setDuration(total);
+      }
+      updateProgress(cur, total);
     }
 
-    if (total > 0 && total !== duration) {
-      setDuration(total);
-    }
-    updateProgress(cur, total);
-
-    // Calculate buffered range
-    if (videoRef.current.buffered.length > 0) {
-      const bEnd = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
-      setBufferedEnd(bEnd);
+    // Calculate buffered range accurately with stream offset
+    if (v.buffered && v.buffered.length > 0) {
+      const b = v.buffered;
+      let activeRange = { start: streamOffset + b.start(0), end: streamOffset + b.end(b.length - 1) };
+      for (let i = 0; i < b.length; i++) {
+        if (v.currentTime >= b.start(i) - 1 && v.currentTime <= b.end(i) + 1) {
+          activeRange = { start: streamOffset + b.start(i), end: streamOffset + b.end(i) };
+          break;
+        }
+      }
+      setBufferedRange(activeRange);
+      setBufferedEnd(activeRange.end);
     }
 
     // Binge Mode: Show Next Episode countdown during last 25 seconds of TV shows
@@ -756,8 +796,10 @@ export default function NovaPlayer() {
       lastSkipDirectionRef.current = direction;
     }
 
-    const maxDur = authoritativeDuration || (videoRef.current.duration) || 0;
-    const targetTime = Math.max(0, Math.min(maxDur, videoRef.current.currentTime + seconds));
+    const maxDur = authoritativeDuration || (videoRef.current ? videoRef.current.duration : 0) || 0;
+    const streamOffset = isDirectFileMode ? 0 : streamOffsetRef.current;
+    const cur = streamOffset + (videoRef.current ? videoRef.current.currentTime : currentTime);
+    const targetTime = Math.max(0, Math.min(maxDur, cur + seconds));
 
     commitSeek(targetTime);
 
@@ -784,11 +826,14 @@ export default function NovaPlayer() {
     const video = videoRef.current;
     if (!video) return;
 
+    const streamOffset = isDirectFileMode ? 0 : streamOffsetRef.current;
+    const localTarget = isDirectFileMode ? finalTime : (finalTime - streamOffset);
+
     // Check if target is already in the buffered segment range
     let isBuffered = false;
     if (video.buffered) {
       for (let i = 0; i < video.buffered.length; i++) {
-        if (finalTime >= (video.buffered.start(i) - 0.5) && finalTime <= (video.buffered.end(i) + 0.5)) {
+        if (localTarget >= (video.buffered.start(i) - 0.5) && localTarget <= (video.buffered.end(i) + 0.5)) {
           isBuffered = true;
           break;
         }
@@ -796,22 +841,17 @@ export default function NovaPlayer() {
     }
 
     if (isBuffered || isDirectFileMode) {
-      // Instant seek within buffered media
-      video.currentTime = finalTime;
+      // Instant seek within buffered media or direct file stream
+      isSeekingRef.current = true;
+      video.currentTime = Math.max(0, localTarget);
+      revealControls(2500);
     } else {
-      // Seek outside buffer in HLS mode: try setting video.currentTime first so HLS can leverage CachedFragmentLoader
-      video.currentTime = finalTime;
-
-      if (hlsRef.current) {
-        seekStallTimeoutRef.current = setTimeout(() => {
-          if (video && (video.seeking || video.readyState < 2)) {
-            console.log(`[NovaPlayer] Seek to ${finalTime.toFixed(1)}s requires fresh transcode session`);
-            initializeStream(quality, hdrMode, finalTime);
-          }
-        }, 1500);
-      } else {
-        initializeStream(quality, hdrMode, finalTime);
-      }
+      // Seek outside buffer in HLS mode:
+      // Immediately request a fresh transcode stream at the target timestamp.
+      isSeekingRef.current = true;
+      setIsLoading(true);
+      console.log(`[NovaPlayer] Seek to ${finalTime.toFixed(1)}s outside buffer -> starting session at ${finalTime.toFixed(1)}s`);
+      initializeStream(quality, hdrMode, finalTime);
     }
 
     revealControls(3500);
@@ -1214,15 +1254,16 @@ export default function NovaPlayer() {
   };
 
   const handleScrubberPointerUp = (e) => {
-    if (isScrubbingRef.current) {
-      if (e.currentTarget.releasePointerCapture) {
-        try {
-          e.currentTarget.releasePointerCapture(e.pointerId);
-        } catch (_) {}
-      }
-      isScrubbingRef.current = false;
-      setIsScrubbing(false);
+    const wasScrubbing = isScrubbingRef.current;
+    if (e.currentTarget.releasePointerCapture) {
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch (_) {}
+    }
+    isScrubbingRef.current = false;
+    setIsScrubbing(false);
 
+    if (wasScrubbing) {
       const rect = scrubberContainerRef.current?.getBoundingClientRect();
       const percent = rect ? Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) : 0;
       const target = percent * displayDuration;
@@ -1708,7 +1749,8 @@ export default function NovaPlayer() {
           filter: `brightness(${brightness})`
         }}
         onTimeUpdate={handleTimeUpdate}
-        onSeeked={handleTimeUpdate}
+        onSeeked={handleSeeked}
+        onSeeking={() => { isSeekingRef.current = true; }}
         onPlay={() => {
           setIsPlaying(true);
           revealControls(2500);
@@ -2443,8 +2485,8 @@ export default function NovaPlayer() {
               <div className="absolute inset-x-0 h-1 sm:h-1.5 rounded-full bg-white/20 overflow-hidden pointer-events-none">
                 {/* Buffered Chunks Progress */}
                 <div
-                  className="h-full bg-white/30 transition-all duration-300"
-                  style={{ width: `${bufferedPercent}%` }}
+                  className="absolute h-full bg-white/30 transition-all duration-300"
+                  style={{ left: `${bufferedStartPercent}%`, width: `${bufferedWidthPercent}%` }}
                 />
               </div>
 

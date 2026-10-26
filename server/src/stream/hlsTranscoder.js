@@ -17,6 +17,7 @@ if (!fs.existsSync(TRANSCODE_ROOT)) {
 
 // Active HLS Transcode Sessions
 const activeSessions = new Map();
+const pendingSessions = new Map();
 
 // High Bitrate & Optimized Real-Time Quality Preset Configurations (Fast, Smooth & Buffer-Free)
 export const PROFILES = {
@@ -267,10 +268,6 @@ function buildFfmpegArgs({
     }
   }
 
-  if (startTime > 0) {
-    args.push('-ss', String(startTime));
-  }
-
   let inputSource = filePath;
   const isStrm = typeof filePath === 'string' && filePath.toLowerCase().endsWith('.strm');
   if (isStrm && fs.existsSync(filePath)) {
@@ -278,23 +275,30 @@ function buildFfmpegArgs({
       const streamUrl = fs.readFileSync(filePath, 'utf-8').trim();
       if (streamUrl.startsWith('http://') || streamUrl.startsWith('https://')) {
         inputSource = streamUrl;
-        if (streamUrl.includes('gofile.io') || streamUrl.includes('.gofile.')) {
-          const token = db.queryOne("SELECT value FROM server_settings WHERE key = 'gofile_token'")?.value || process.env.GOFILE_TOKEN || '';
-          args.push('-headers', `Authorization: Bearer ${token}\r\n`);
-        }
       }
     } catch (e) {
       console.warn('[HLSTranscoder] Could not read .strm file:', e.message);
     }
   }
 
-  // Network stream reconnect parameters for remote storage (e.g. Gofile CDN)
-  if (typeof inputSource === 'string' && (inputSource.startsWith('http://') || inputSource.startsWith('https://'))) {
+  const isRemote = typeof inputSource === 'string' && (inputSource.startsWith('http://') || inputSource.startsWith('https://'));
+
+  if (isRemote) {
+    if (inputSource.includes('gofile.io') || inputSource.includes('.gofile.')) {
+      const token = db.queryOne("SELECT value FROM server_settings WHERE key = 'gofile_token'")?.value || process.env.GOFILE_TOKEN || '';
+      if (token) {
+        args.push('-headers', `Authorization: Bearer ${token}\r\n`);
+      }
+    }
     args.push(
+      '-seekable', '1',
       '-reconnect', '1',
-      '-reconnect_streamed', '1',
       '-reconnect_delay_max', '5'
     );
+  }
+
+  if (startTime > 0) {
+    args.push('-ss', String(startTime));
   }
 
   args.push('-threads', '0');
@@ -417,8 +421,8 @@ async function waitForHlsPlaylist(playlistPath, processRef = null, maxWaitMs = 2
         try {
           const content = fs.readFileSync(playlistPath, 'utf-8');
           const tsCount = (content.match(/\.ts/g) || []).length;
-          // Prefer 2 segments for smooth buffer, or 1 segment if elapsed > 2500ms
-          if (tsCount >= 2 || (tsCount >= 1 && (Date.now() - start > 2500))) {
+          // Respond immediately once first segment is indexed for zero-latency start
+          if (tsCount >= 1) {
             clearInterval(interval);
             return resolve(true);
           }
@@ -457,143 +461,165 @@ export async function getOrCreateHlsSession(
   const sessionKey = `${mediaId}_${profileKey}_${hdrTag}${audKey}_ss${startTime}`;
   let session = activeSessions.get(sessionKey);
 
-  if (session && fs.existsSync(session.playlistPath)) {
+  if (session) {
     session.lastAccessed = Date.now();
-    return session;
+    if (fs.existsSync(session.playlistPath)) {
+      return session;
+    }
+    if (session.process && !session.process.killed) {
+      await waitForHlsPlaylist(session.playlistPath, session.process, 35000);
+      return session;
+    }
   }
 
-  // Immediately terminate any superseded sessions for this media to free CPU cores
-  for (const [key, oldSession] of activeSessions.entries()) {
-    if (oldSession.mediaId === mediaId && key !== sessionKey) {
-      console.log(`[HLSTranscoder] Superseding session ${key} for media ${mediaId} to free CPU`);
-      if (oldSession.process && !oldSession.process.killed) {
-        try { oldSession.process.kill('SIGTERM'); } catch (_) {}
+  if (pendingSessions.has(sessionKey)) {
+    return await pendingSessions.get(sessionKey);
+  }
+
+  const createPromise = (async () => {
+    // Only terminate genuinely abandoned sessions for this media (idle > 20 seconds)
+    const now = Date.now();
+    for (const [key, oldSession] of activeSessions.entries()) {
+      if (oldSession.mediaId === mediaId && key !== sessionKey) {
+        if (now - (oldSession.lastAccessed || 0) > 20000) {
+          console.log(`[HLSTranscoder] Cleaning up abandoned session ${key} for media ${mediaId} to free CPU`);
+          if (oldSession.process && !oldSession.process.killed) {
+            try { oldSession.process.kill('SIGTERM'); } catch (_) {}
+          }
+          try {
+            fs.rmSync(oldSession.dir, { recursive: true, force: true });
+          } catch (_) {}
+          activeSessions.delete(key);
+        }
       }
+    }
+
+    const sessionDir = path.join(TRANSCODE_ROOT, sessionKey);
+    if (fs.existsSync(sessionDir)) {
       try {
-        fs.rmSync(oldSession.dir, { recursive: true, force: true });
+        fs.rmSync(sessionDir, { recursive: true, force: true });
       } catch (_) {}
-      activeSessions.delete(key);
     }
-  }
+    fs.mkdirSync(sessionDir, { recursive: true });
 
-  const sessionDir = path.join(TRANSCODE_ROOT, sessionKey);
-  if (fs.existsSync(sessionDir)) {
-    try {
-      fs.rmSync(sessionDir, { recursive: true, force: true });
-    } catch (_) {}
-  }
-  fs.mkdirSync(sessionDir, { recursive: true });
+    const playlistPath = path.join(sessionDir, 'stream.m3u8');
+    const segmentPattern = path.join(sessionDir, 'segment-%04d.ts');
 
-  const playlistPath = path.join(sessionDir, 'stream.m3u8');
-  const segmentPattern = path.join(sessionDir, 'segment-%04d.ts');
+    // Determine initial acceleration mode
+    let targetHwMode = canCopyVideo ? 'cpu' : hwInfo.mode;
 
-  // Determine initial acceleration mode
-  let targetHwMode = canCopyVideo ? 'cpu' : hwInfo.mode;
-
-  let ffmpegArgs = buildFfmpegArgs({
-    filePath,
-    startTime,
-    audioTrackIndex,
-    canCopyVideo,
-    profile,
-    applyTonemap,
-    hwMode: targetHwMode,
-    devicePath: hwInfo.devicePath,
-    playlistPath,
-    segmentPattern
-  });
-
-  console.log(`[HLSTranscoder] Starting session ${sessionKey} (Quality: ${profileKey}, Mode: ${canCopyVideo ? 'Bit-for-Bit Copy' : 'High-Bitrate Encode'}, HW: ${targetHwMode.toUpperCase()}, Source HDR: ${isSourceHDR}, Tonemap: ${applyTonemap}, Audio: ${audioTrackIndex ?? 'default'})`);
-
-  let ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
-
-  let stderrBuffer = '';
-  ffmpegProcess.stderr.on('data', (d) => {
-    stderrBuffer += d.toString();
-  });
-
-  // Track if hardware acceleration failed early and needs fallback
-  let failedHw = false;
-  ffmpegProcess.on('exit', (code) => {
-    if (code !== 0 && code !== null) {
-      if (targetHwMode !== 'cpu') {
-        failedHw = true;
-      }
-      console.error(`[HLSTranscoder] Session ${sessionKey} (HW: ${targetHwMode}) exited with error code ${code}: ${stderrBuffer.slice(-300).trim()}`);
-    } else {
-      console.log(`[HLSTranscoder] Session ${sessionKey} process exited cleanly`);
-    }
-  });
-
-  let ready = await waitForHlsPlaylist(playlistPath, ffmpegProcess, targetHwMode !== 'cpu' ? 5000 : 20000);
-
-  // Automatic seamless fallback to software CPU transcoding if hardware acceleration failed
-  if (!ready && targetHwMode !== 'cpu') {
-    console.warn(`[HLSTranscoder] Hardware acceleration (${targetHwMode}) failed or timed out for ${sessionKey}. Falling back seamlessly to software CPU (libx264)...`);
-    try {
-      if (ffmpegProcess && !ffmpegProcess.killed) ffmpegProcess.kill('SIGTERM');
-    } catch (_) {}
-
-    // Disable failing hw mode so subsequent requests do not suffer repeat failures
-    detectedHwaccel = {
-      mode: 'cpu',
-      encoder: 'libx264',
-      devicePath: null,
-      hasDri: hwInfo.hasDri,
-      hasNvidia: hwInfo.hasNvidia,
-      isHardwareAccelerated: false
-    };
-
-    targetHwMode = 'cpu';
-    ffmpegArgs = buildFfmpegArgs({
+    let ffmpegArgs = buildFfmpegArgs({
       filePath,
       startTime,
       audioTrackIndex,
       canCopyVideo,
       profile,
       applyTonemap,
-      hwMode: 'cpu',
-      devicePath: null,
+      hwMode: targetHwMode,
+      devicePath: hwInfo.devicePath,
       playlistPath,
       segmentPattern
     });
 
-    ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
+    console.log(`[HLSTranscoder] Starting session ${sessionKey} (Quality: ${profileKey}, Mode: ${canCopyVideo ? 'Bit-for-Bit Copy' : 'High-Bitrate Encode'}, HW: ${targetHwMode.toUpperCase()}, Source HDR: ${isSourceHDR}, Tonemap: ${applyTonemap}, Audio: ${audioTrackIndex ?? 'default'})`);
+
+    let ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
       stdio: ['ignore', 'pipe', 'pipe']
     });
 
-    stderrBuffer = '';
+    let stderrBuffer = '';
     ffmpegProcess.stderr.on('data', (d) => {
       stderrBuffer += d.toString();
     });
 
+    // Track if hardware acceleration failed early and needs fallback
+    let failedHw = false;
     ffmpegProcess.on('exit', (code) => {
       if (code !== 0 && code !== null) {
-        console.error(`[HLSTranscoder] Software CPU fallback for ${sessionKey} exited with code ${code}:\n`, stderrBuffer.slice(-800));
+        if (targetHwMode !== 'cpu') {
+          failedHw = true;
+        }
+        console.error(`[HLSTranscoder] Session ${sessionKey} (HW: ${targetHwMode}) exited with error code ${code}: ${stderrBuffer.slice(-300).trim()}`);
+      } else {
+        console.log(`[HLSTranscoder] Session ${sessionKey} process exited cleanly`);
       }
     });
 
-    ready = await waitForHlsPlaylist(playlistPath, 20000);
+    let ready = await waitForHlsPlaylist(playlistPath, ffmpegProcess, targetHwMode !== 'cpu' ? 5000 : 35000);
+
+    // Automatic seamless fallback to software CPU transcoding if hardware acceleration failed
+    if (!ready && targetHwMode !== 'cpu') {
+      console.warn(`[HLSTranscoder] Hardware acceleration (${targetHwMode}) failed or timed out for ${sessionKey}. Falling back seamlessly to software CPU (libx264)...`);
+      try {
+        if (ffmpegProcess && !ffmpegProcess.killed) ffmpegProcess.kill('SIGTERM');
+      } catch (_) {}
+
+      // Disable failing hw mode so subsequent requests do not suffer repeat failures
+      detectedHwaccel = {
+        mode: 'cpu',
+        encoder: 'libx264',
+        devicePath: null,
+        hasDri: hwInfo.hasDri,
+        hasNvidia: hwInfo.hasNvidia,
+        isHardwareAccelerated: false
+      };
+
+      targetHwMode = 'cpu';
+      ffmpegArgs = buildFfmpegArgs({
+        filePath,
+        startTime,
+        audioTrackIndex,
+        canCopyVideo,
+        profile,
+        applyTonemap,
+        hwMode: 'cpu',
+        devicePath: null,
+        playlistPath,
+        segmentPattern
+      });
+
+      ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+      stderrBuffer = '';
+      ffmpegProcess.stderr.on('data', (d) => {
+        stderrBuffer += d.toString();
+      });
+
+      ffmpegProcess.on('exit', (code) => {
+        if (code !== 0 && code !== null) {
+          console.error(`[HLSTranscoder] Software CPU fallback for ${sessionKey} exited with code ${code}:\n`, stderrBuffer.slice(-800));
+        }
+      });
+
+      ready = await waitForHlsPlaylist(playlistPath, ffmpegProcess, 35000);
+    }
+
+    const createdSession = {
+      key: sessionKey,
+      mediaId,
+      quality: profileKey,
+      hwMode: targetHwMode,
+      hdrMode: applyTonemap ? 'SDR Tonemap' : (isSourceHDR ? 'HDR Passthrough' : 'SDR Direct'),
+      startTime,
+      dir: sessionDir,
+      playlistPath,
+      process: ffmpegProcess,
+      lastAccessed: Date.now(),
+      createdAt: Date.now()
+    };
+
+    activeSessions.set(sessionKey, createdSession);
+    return createdSession;
+  })();
+
+  pendingSessions.set(sessionKey, createPromise);
+  try {
+    return await createPromise;
+  } finally {
+    pendingSessions.delete(sessionKey);
   }
-
-  session = {
-    key: sessionKey,
-    mediaId,
-    quality: profileKey,
-    hwMode: targetHwMode,
-    hdrMode: applyTonemap ? 'SDR Tonemap' : (isSourceHDR ? 'HDR Passthrough' : 'SDR Direct'),
-    startTime,
-    dir: sessionDir,
-    playlistPath,
-    process: ffmpegProcess,
-    lastAccessed: Date.now(),
-    createdAt: Date.now()
-  };
-
-  activeSessions.set(sessionKey, session);
-  return session;
 }
 
 /**
