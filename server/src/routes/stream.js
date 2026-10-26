@@ -110,19 +110,8 @@ router.get('/hls/:mediaId/master.m3u8', async (req, res) => {
 
     let effectiveQuality = quality;
     if (quality === 'auto') {
-      const filePath = getFilePath(req.params.mediaId, episodeId);
-      const isH264 = checkIsH264(filePath, req.params.mediaId);
-      if (isH264) {
-        effectiveQuality = 'direct';
-      } else {
-        const targetId = req.params.mediaId;
-        const row = db.queryOne('SELECT height FROM media_items WHERE id = ?', [targetId]) ||
-                    db.queryOne('SELECT height FROM tv_episodes WHERE id = ?', [episodeId || targetId]);
-        const h = row?.height || 1080;
-        if (h <= 480) effectiveQuality = '480p';
-        else if (h <= 720) effectiveQuality = '720p';
-        else effectiveQuality = '1080p';
-      }
+      // In auto mode, default to 'direct' (bit-for-bit copy) for zero-latency, buffer-free playback
+      effectiveQuality = 'direct';
     }
 
     // Serve optimal single-variant stream directly to avoid parallel multi-stream CPU thrashing

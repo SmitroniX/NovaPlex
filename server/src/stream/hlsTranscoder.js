@@ -291,9 +291,14 @@ function buildFfmpegArgs({
       }
     }
     args.push(
+      '-multiple_requests', '1',
       '-seekable', '1',
       '-reconnect', '1',
-      '-reconnect_delay_max', '5'
+      '-reconnect_on_network_error', '1',
+      '-reconnect_on_http_error', '4xx,5xx',
+      '-reconnect_delay_max', '5',
+      '-probesize', '1000000',
+      '-analyzeduration', '1000000'
     );
   }
 
@@ -454,7 +459,7 @@ export async function getOrCreateHlsSession(
   const isH264 = checkIsH264(filePath, mediaId);
 
   const applyTonemap = isSourceHDR && (hdrMode === 'off' || hdrMode === 'sdr');
-  const canCopyVideo = Boolean(profile.copyVideo && !applyTonemap && isH264);
+  const canCopyVideo = Boolean(profile.copyVideo && !applyTonemap);
 
   const hwInfo = await detectHardwareCapabilities();
   const audKey = (audioTrackIndex !== null && audioTrackIndex !== undefined && audioTrackIndex !== '') ? `_a${audioTrackIndex}` : '';
