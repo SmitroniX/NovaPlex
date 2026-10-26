@@ -73,7 +73,7 @@ router.all('/remux/:mediaId', (req, res) => {
 });
 
 // Helper to serve single variant playlist
-async function serveVariantPlaylist(req, res, mediaId, episodeId, quality, hdr, start, audioTrack) {
+async function serveVariantPlaylist(req, res, mediaId, episodeId, quality, hdr, start, audioTrack, hevc = '1') {
   const filePath = getFilePath(mediaId, episodeId);
 
   if (!filePath || !fs.existsSync(filePath)) {
@@ -86,7 +86,19 @@ async function serveVariantPlaylist(req, res, mediaId, episodeId, quality, hdr, 
     if (epRow) targetId = epRow.id;
   }
 
-  const session = await getOrCreateHlsSession(targetId, filePath, quality, hdr, parseFloat(start || 0), audioTrack);
+  let effectiveQuality = quality;
+  if (quality === 'auto') {
+    const isH264 = checkIsH264(filePath, targetId);
+    const clientCanHevc = hevc === 'true' || hevc === '1';
+
+    if (isH264 || clientCanHevc) {
+      effectiveQuality = 'direct';
+    } else {
+      effectiveQuality = '720p'; // Optimal real-time transcode for non-HEVC clients
+    }
+  }
+
+  const session = await getOrCreateHlsSession(targetId, filePath, effectiveQuality, hdr, parseFloat(start || 0), audioTrack, hevc);
   if (!session || !fs.existsSync(session.playlistPath)) {
     return res.status(500).json({ error: 'Failed to initialize HLS transcode session' });
   }
@@ -106,16 +118,10 @@ async function serveVariantPlaylist(req, res, mediaId, episodeId, quality, hdr, 
 // 3. Adaptive HLS Transcoder Master Playlist (Single-session optimal delivery to prevent multi-stream CPU thrashing)
 router.get('/hls/:mediaId/master.m3u8', async (req, res) => {
   try {
-    const { episodeId, quality = 'direct', hdr = 'auto', start = 0, audioTrack } = req.query;
-
-    let effectiveQuality = quality;
-    if (quality === 'auto') {
-      // In auto mode, default to 'direct' (bit-for-bit copy) for zero-latency, buffer-free playback
-      effectiveQuality = 'direct';
-    }
+    const { episodeId, quality = 'auto', hdr = 'auto', start = 0, audioTrack, hevc = '1' } = req.query;
 
     // Serve optimal single-variant stream directly to avoid parallel multi-stream CPU thrashing
-    await serveVariantPlaylist(req, res, req.params.mediaId, episodeId, effectiveQuality, hdr, start, audioTrack);
+    await serveVariantPlaylist(req, res, req.params.mediaId, episodeId, quality, hdr, start, audioTrack, hevc);
   } catch (err) {
     console.error('[StreamRoute] HLS error:', err);
     res.status(500).json({ error: 'Failed to transcode stream', message: err.message });
@@ -125,8 +131,8 @@ router.get('/hls/:mediaId/master.m3u8', async (req, res) => {
 // 3.1 Serve specific variant stream playlist for ABR
 router.get('/hls/:mediaId/variant.m3u8', async (req, res) => {
   try {
-    const { episodeId, quality = '1080p', hdr = 'auto', start = 0, audioTrack } = req.query;
-    await serveVariantPlaylist(req, res, req.params.mediaId, episodeId, quality, hdr, start, audioTrack);
+    const { episodeId, quality = '1080p', hdr = 'auto', start = 0, audioTrack, hevc = '1' } = req.query;
+    await serveVariantPlaylist(req, res, req.params.mediaId, episodeId, quality, hdr, start, audioTrack, hevc);
   } catch (err) {
     console.error('[StreamRoute] Variant HLS error:', err);
     res.status(500).json({ error: 'Failed to stream variant', message: err.message });

@@ -451,20 +451,23 @@ export async function getOrCreateHlsSession(
   quality = 'direct',
   hdrMode = 'auto',
   startTime = 0,
-  audioTrackIndex = null
+  audioTrackIndex = null,
+  hevc = '1'
 ) {
   const profileKey = PROFILES[quality] ? quality : 'direct';
   const profile = PROFILES[profileKey];
   const isSourceHDR = checkIsSourceHDR(filePath, mediaId);
   const isH264 = checkIsH264(filePath, mediaId);
+  const clientCanHevc = hevc === 'true' || hevc === '1';
 
   const applyTonemap = isSourceHDR && (hdrMode === 'off' || hdrMode === 'sdr');
-  const canCopyVideo = Boolean(profile.copyVideo && !applyTonemap);
+  const canCopyVideo = Boolean(profile.copyVideo && !applyTonemap && (isH264 || clientCanHevc));
 
   const hwInfo = await detectHardwareCapabilities();
   const audKey = (audioTrackIndex !== null && audioTrackIndex !== undefined && audioTrackIndex !== '') ? `_a${audioTrackIndex}` : '';
   const hdrTag = applyTonemap ? 'sdr_tonemap' : (isSourceHDR ? 'hdr' : 'sdr');
-  const sessionKey = `${mediaId}_${profileKey}_${hdrTag}${audKey}_ss${startTime}`;
+  const copyTag = canCopyVideo ? '_copy' : '_enc';
+  const sessionKey = `${mediaId}_${profileKey}_${hdrTag}${audKey}${copyTag}_ss${startTime}`;
   let session = activeSessions.get(sessionKey);
 
   if (session) {
@@ -629,12 +632,12 @@ export async function getOrCreateHlsSession(
 }
 
 /**
- * Periodic cleanup of inactive transcode sessions (idle > 35 seconds)
+ * Periodic cleanup of inactive transcode sessions (idle > 10 minutes)
  */
 setInterval(() => {
   const now = Date.now();
   for (const [key, session] of activeSessions.entries()) {
-    if (now - session.lastAccessed > 35000) {
+    if (now - session.lastAccessed > 600000) {
       console.log(`[HLSTranscoder] Cleaning up idle session ${key}...`);
       if (session.process && !session.process.killed) {
         session.process.kill('SIGTERM');
@@ -645,12 +648,22 @@ setInterval(() => {
       activeSessions.delete(key);
     }
   }
-}, 15000);
+}, 30000);
 
 export function touchHlsSession(sessionKey) {
   const session = activeSessions.get(sessionKey);
   if (session) {
     session.lastAccessed = Date.now();
+  }
+}
+
+export function touchHlsSessionByMediaId(mediaId) {
+  if (!mediaId) return;
+  const now = Date.now();
+  for (const session of activeSessions.values()) {
+    if (session.mediaId === mediaId) {
+      session.lastAccessed = now;
+    }
   }
 }
 

@@ -1,5 +1,6 @@
 import express from 'express';
 import { db } from '../db/database.js';
+import { touchHlsSessionByMediaId } from '../stream/hlsTranscoder.js';
 
 const router = express.Router();
 
@@ -82,6 +83,9 @@ router.post('/progress', (req, res) => {
     const pos = parseFloat(positionSeconds) || 0;
     const dur = parseFloat(durationSeconds) || 0;
     const isDone = completed || (dur > 0 && pos / dur > 0.92) ? 1 : 0;
+
+    // Keep active HLS transcode session alive as long as user is playing
+    touchHlsSessionByMediaId(mediaId);
 
     db.run(`
       INSERT INTO playback_state (user_id, media_id, position_seconds, duration_seconds, completed, last_watched_at)

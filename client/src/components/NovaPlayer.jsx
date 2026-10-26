@@ -434,10 +434,18 @@ export default function NovaPlayer() {
   // Construct Stream URL based on Quality, HDR Mode, Selected Audio Track, and Start Position
   const getStreamUrl = useCallback((qual, hdr, audTrack, startPos) => {
     if (!playingItem) return '';
+    const canPlayHEVC = typeof window !== 'undefined' && Boolean(
+      (window.MediaSource && (
+        MediaSource.isTypeSupported('video/mp4; codecs="hvc1.1.6.L93.B0"') ||
+        MediaSource.isTypeSupported('video/mp4; codecs="hev1.1.6.L93.B0"')
+      )) ||
+      document.createElement('video').canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"')
+    );
     const params = new URLSearchParams({
       quality: qual,
       hdr: hdr,
-      start: Math.floor(startPos ?? 0)
+      start: Math.floor(startPos ?? 0),
+      hevc: canPlayHEVC ? '1' : '0'
     });
     if (playingItem.episodeId) params.append('episodeId', playingItem.episodeId);
     if (audTrack !== null && audTrack !== undefined) params.append('audioTrack', audTrack);
@@ -558,9 +566,16 @@ export default function NovaPlayer() {
 
       // Robust Error Handling & Exponential Backoff Auto-Recovery
       hls.on(Hls.Events.ERROR, (event, data) => {
-        console.warn('[NovaPlayer] HLS event error:', data.type, data.details, data.fatal);
+        if (!data.fatal) {
+          if (data.details === 'bufferStalledError' || data.details === 'bufferSeekOverHole') {
+            if (videoRef.current && !videoRef.current.paused && videoRef.current.readyState >= 2) {
+              videoRef.current.play().catch(() => {});
+            }
+          }
+          return;
+        }
 
-        if (data.fatal) {
+        console.warn('[NovaPlayer] Fatal HLS event error:', data.type, data.details);
           switch (data.type) {
             case Hls.ErrorTypes.NETWORK_ERROR: {
               const attempt = retryAttemptRef.current + 1;
@@ -616,7 +631,6 @@ export default function NovaPlayer() {
               break;
             }
           }
-        }
       });
 
       hlsRef.current = hls;
